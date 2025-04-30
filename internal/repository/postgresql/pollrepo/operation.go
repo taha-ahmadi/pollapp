@@ -380,3 +380,47 @@ func (r Repository) getPollTags(ctx context.Context, pollID int) ([]string, erro
 
 	return tags, nil
 }
+
+// GetAllWithTags retrieves all polls with their tags from the database
+func (r Repository) GetAllWithTags(ctx context.Context) ([]domain.Poll, error) {
+	query := `
+		SELECT p.id, p.title, p.created_at
+		FROM polls p
+		ORDER BY p.created_at DESC
+	`
+
+	rows, err := r.pool.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("query polls: %w", err)
+	}
+	defer rows.Close()
+
+	polls := []domain.Poll{}
+	for rows.Next() {
+		var poll domain.Poll
+		err = rows.Scan(&poll.ID, &poll.Title, &poll.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("scan poll: %w", err)
+		}
+
+		options, err := r.getPollOptions(ctx, int(poll.ID))
+		if err != nil {
+			return nil, fmt.Errorf("get poll options: %w", err)
+		}
+		poll.Options = options
+
+		tags, err := r.getPollTags(ctx, int(poll.ID))
+		if err != nil {
+			return nil, fmt.Errorf("get poll tags: %w", err)
+		}
+		poll.Tags = tags
+
+		polls = append(polls, poll)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows error: %w", err)
+	}
+
+	return polls, nil
+}

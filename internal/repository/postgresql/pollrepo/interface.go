@@ -15,4 +15,5 @@ type IPollRepository interface {
 	Skip(ctx context.Context, pollID uint, skip domain.SkipRequest) error
 	GetStats(ctx context.Context, pollID uint) (*domain.PollStats, error)
 	CheckDailyVoteLimit(ctx context.Context, userID uint) (int, error)
+	GetAllWithTags(ctx context.Context) ([]domain.Poll, error)
 }
