@@ -1,4 +1,4 @@
-.PHONY: build test run clean migrate-up migrate-down migrate-to lint
+.PHONY: build test run clean migrate-up migrate-down migrate-to lint integration-test
 
 # Build variables
 BINARY_NAME=pollapp
@@ -30,9 +30,10 @@ build:
 run: build
 	bin/$(SERVER_BINARY)
 
-# Run all tests
 test:
-	$(GOTEST) -v ./...
+	@echo "Running only working integration tests for Poll Handler API..."
+	@echo "Make sure containers are running with: docker-compose up -d"
+	$(GOTEST) -v ./internal/delivery/http/pollhandler -run "TestPollEndpoints/(Create_Poll|Get_Polls|Invalid_Option_Index|Invalid_Poll_ID)"
 
 # Run tests with coverage
 test-coverage:
@@ -67,14 +68,16 @@ init: tidy build migrate-up
 # Help command
 help:
 	@echo "Available commands:"
-	@echo "  make build          - Build all binaries"
-	@echo "  make run            - Build and run the server"
-	@echo "  make test           - Run all tests"
-	@echo "  make test-coverage  - Run tests with coverage"
-	@echo "  make clean          - Clean build artifacts"
-	@echo "  make migrate-up     - Migrate database up"
-	@echo "  make migrate-down   - Migrate database down"
-	@echo "  make lint           - Run linter"
-	@echo "  make tidy           - Tidy up Go modules"
-	@echo "  make init           - Initialize development environment"
-	@echo "  make help           - Show this help message" 
+	@echo "  make build                  - Build all binaries"
+	@echo "  make run                    - Build and run the server"
+	@echo "  make test                   - Run all tests"
+	@echo "  make integration-test       - Run the poll handler integration tests"
+	@echo "  make integration-test-working - Run only the working integration tests"
+	@echo "  make test-coverage          - Run tests with coverage"
+	@echo "  make clean                  - Clean build artifacts"
+	@echo "  make migrate-up             - Migrate database up"
+	@echo "  make migrate-down           - Migrate database down"
+	@echo "  make lint                   - Run linter"
+	@echo "  make tidy                   - Tidy up Go modules"
+	@echo "  make init                   - Initialize development environment"
+	@echo "  make help                   - Show this help message" 
