@@ -25,6 +25,7 @@ import (
 	"pollapp/internal/repository/redis/voterepo"
 	"pollapp/internal/service/pollservice"
 	"pollapp/internal/worker"
+	"pollapp/pkg/monitoring"
 	"pollapp/pkg/zlog"
 
 	"github.com/labstack/echo/v4"
@@ -65,6 +66,10 @@ func main() {
 	defer zlog.Sync()
 
 	zlog.L.Info("Configuration loaded successfully")
+
+	// Initialize Prometheus metrics
+	monitoring.SetupMonitoringMetrics()
+	zlog.L.Info("Prometheus metrics initialized")
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -114,7 +119,12 @@ func main() {
 	// Initialize repositories
 	pollRepo := pollrepo.New(db.Pool)
 	redisDB := redisdb.New(redisAdapter.Client())
-	voteRepo := voterepo.New(redisDB)
+
+	// Create vote repository with metrics
+	baseVoteRepo := voterepo.New(redisDB)
+	voteRepo := voterepo.NewWithMetrics(baseVoteRepo)
+
+	// Create feed repository
 	feedRepo := feedrepo.New(redisDB, voteRepo)
 
 	// Initialize service with message broker
@@ -146,9 +156,14 @@ func main() {
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
 	e.Use(middleware.CORS())
+	// Add Prometheus middleware for HTTP metrics
+	e.Use(http.PrometheusMiddleware())
 
 	// Swagger documentation
 	e.GET("/swagger/*", echoSwagger.WrapHandler)
+
+	// Prometheus metrics endpoint
+	e.GET("/metrics", echo.WrapHandler(monitoring.MetricsHandler()))
 
 	// Setup routes
 	pollHandler.SetupRoutes(e)

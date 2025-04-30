@@ -1,6 +1,7 @@
 package model
 
 import (
+	"pollapp/internal/service/domain"
 	"time"
 )
 
@@ -10,4 +11,13 @@ type Skip struct {
 	PollID    int
 	UserID    int
 	CreatedAt time.Time
+}
+
+func (s Skip) ToDomain() domain.Skip {
+	return domain.Skip{
+		ID:        s.ID,
+		PollID:    s.PollID,
+		UserID:    s.UserID,
+		CreatedAt: s.CreatedAt,
+	}
 }

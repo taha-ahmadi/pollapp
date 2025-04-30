@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: "pollapp_monitor"
+
+scrape_configs:
+  - job_name: "pollapp"
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["api:8080"]

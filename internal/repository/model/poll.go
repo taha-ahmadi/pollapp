@@ -46,8 +46,27 @@ type PollStats struct {
 	Votes     []OptionStat
 }
 
+func (p PollStats) ToDomain() domain.PollStats {
+	domainVotes := make([]domain.OptionStat, len(p.Votes))
+	for i, v := range p.Votes {
+		domainVotes[i] = v.ToDomain()
+	}
+
+	return domain.PollStats{
+		PollID: int(p.ID),
+		Votes:  domainVotes,
+	}
+}
+
 // OptionStat represents vote statistics for a single option
 type OptionStat struct {
 	Option string
 	Count  int
+}
+
+func (o OptionStat) ToDomain() domain.OptionStat {
+	return domain.OptionStat{
+		Option: o.Option,
+		Count:  o.Count,
+	}
 }

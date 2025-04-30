@@ -95,13 +95,6 @@ func (r Repository) Get(ctx context.Context, filter domain.GetPollsParams) ([]do
 		args = append(args, filter.Tag)
 	}
 
-	if filter.Limit <= 0 {
-		filter.Limit = 10
-	}
-	if filter.Page <= 0 {
-		filter.Page = 1
-	}
-
 	offset := (filter.Page - 1) * filter.Limit
 
 	paramCount++
@@ -122,9 +115,9 @@ func (r Repository) Get(ctx context.Context, filter domain.GetPollsParams) ([]do
 	}
 	defer rows.Close()
 
-	polls := []domain.Poll{}
+	polls := []model.Poll{}
 	for rows.Next() {
-		var poll domain.Poll
+		var poll model.Poll
 		err = rows.Scan(&poll.ID, &poll.Title, &poll.CreatedAt)
 		if err != nil {
 			return nil, fmt.Errorf("scan poll: %w", err)
@@ -149,7 +142,12 @@ func (r Repository) Get(ctx context.Context, filter domain.GetPollsParams) ([]do
 		return nil, fmt.Errorf("rows error: %w", err)
 	}
 
-	return polls, nil
+	domainPolls := make([]domain.Poll, len(polls))
+	for i, poll := range polls {
+		domainPolls[i] = poll.ToDomain()
+	}
+
+	return domainPolls, nil
 }
 
 // GetByID retrieves a poll by ID
@@ -395,9 +393,9 @@ func (r Repository) GetAllWithTags(ctx context.Context) ([]domain.Poll, error) {
 	}
 	defer rows.Close()
 
-	polls := []domain.Poll{}
+	polls := []model.Poll{}
 	for rows.Next() {
-		var poll domain.Poll
+		var poll model.Poll
 		err = rows.Scan(&poll.ID, &poll.Title, &poll.CreatedAt)
 		if err != nil {
 			return nil, fmt.Errorf("scan poll: %w", err)
@@ -422,5 +420,10 @@ func (r Repository) GetAllWithTags(ctx context.Context) ([]domain.Poll, error) {
 		return nil, fmt.Errorf("rows error: %w", err)
 	}
 
-	return polls, nil
+	domainPolls := make([]domain.Poll, len(polls))
+	for i, poll := range polls {
+		domainPolls[i] = poll.ToDomain()
+	}
+
+	return domainPolls, nil
 }
