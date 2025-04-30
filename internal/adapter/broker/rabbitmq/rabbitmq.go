@@ -1,264 +1,320 @@
 package rabbitmq
 
 import (
+	"context"
 	"fmt"
-	"log"
-	"log/slog"
+	"sync"
+	"time"
+
 	"pollapp/internal/adapter/broker"
 	"pollapp/pkg/zlog"
-	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-const RabbitMQNS = "rabbitmq"
+const (
+	reconnectDelay      = 5 * time.Second
+	resendDelay         = 5 * time.Second
+	maxReconnectRetries = 20
+)
 
-// TODO: add ack and publish metrics
-type Config struct {
-	Host            string           `koanf:"host"`
-	Port            int              `koanf:"port"`
-	Username        string           `koanf:"username"`
-	Password        string           `koanf:"password"`
-	VirtualHost     string           `koanf:"virtual_host"`
-	QueueOptions    *QueueOptions    `koanf:"queue_options"`
-	ConsumerOptions *ConsumerOptions `koanf:"consumer_options"`
+type Broker struct {
+	config        Config
+	connection    *amqp.Connection
+	channel       *amqp.Channel
+	queues        map[string]amqp.Queue
+	clientName    string
+	mu            sync.Mutex
+	isClosed      bool
+	notifyClose   chan *amqp.Error
+	notifyReturn  chan amqp.Return
+	notifyConfirm chan amqp.Confirmation
+	consumers     map[string]<-chan amqp.Delivery
 }
 
-type QueueOptions struct {
-	Durable    bool `koanf:"durable"`
-	AutoDelete bool `koanf:"auto_delete"`
-	Exclusive  bool `koanf:"exclusive"`
-	NoWait     bool `koanf:"no_wait"`
-}
-
-var DefaultQueueOptions = QueueOptions{
-	Durable:    true,
-	AutoDelete: false,
-	Exclusive:  false,
-	NoWait:     false,
-}
-
-type ConsumerOptions struct {
-	AutoAck   bool `koanf:"auto_ack"`
-	Exclusive bool `koanf:"exclusive"`
-	NoLocal   bool `koanf:"no_local"`
-	NoWait    bool `koanf:"no_wait"`
-}
-
-var DefaultConsumerOptions = ConsumerOptions{
-	AutoAck:   true,
-	Exclusive: false,
-	NoLocal:   false,
-	NoWait:    false,
-}
-
-type Adapter struct {
-	cfg     Config
-	conn    *amqp.Connection
-	channel *amqp.Channel
-	runMod  string
-}
-
-func New(config Config, runMod string, queueNames []string) (*Adapter, error) {
-	fmt.Println("New RabbitMQ", config)
-	if config.QueueOptions == nil {
-		config.QueueOptions = &DefaultQueueOptions
-		zlog.L.Info("queue options is nil, using default", zlog.Any("options", config.QueueOptions))
-	}
-	if config.ConsumerOptions == nil {
-		config.ConsumerOptions = &DefaultConsumerOptions
-		zlog.L.Info("consumer options is nil, using default", zlog.Any("options", config.ConsumerOptions))
+func New(config Config, clientName string, queues []string) (*Broker, error) {
+	broker := &Broker{
+		config:     config,
+		clientName: clientName,
+		queues:     make(map[string]amqp.Queue),
+		consumers:  make(map[string]<-chan amqp.Delivery),
+		isClosed:   false,
 	}
 
-	conn, err := amqp.Dial(fmt.Sprintf("amqp://%s:%s@%s:%d/%s", config.Username, config.Password, config.Host, config.Port, config.VirtualHost))
+	if err := broker.connect(); err != nil {
+		return nil, err
+	}
+
+	for _, queueName := range queues {
+		if err := broker.declareQueue(queueName); err != nil {
+			broker.Close()
+			return nil, err
+		}
+	}
+
+	return broker, nil
+}
+
+func (b *Broker) connect() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.isClosed {
+		return fmt.Errorf("broker is closed")
+	}
+
+	url := fmt.Sprintf("amqp://%s:%s@%s:%d/%s",
+		b.config.Username,
+		b.config.Password,
+		b.config.Host,
+		b.config.Port,
+		b.config.VirtualHost)
+
+	conn, err := amqp.Dial(url)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to RabbitMQ: %v", err)
+		return fmt.Errorf("failed to connect to RabbitMQ: %w", err)
 	}
+	b.connection = conn
+
 	channel, err := conn.Channel()
 	if err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("failed to open a channel: %v", err)
+		return fmt.Errorf("failed to open a channel: %w", err)
 	}
-	for _, queueName := range queueNames {
-		fmt.Printf("queue declare %s \n", queueName)
-		_, err := channel.QueueDeclare(
-			queueName,
-			config.QueueOptions.Durable,    // durable
-			config.QueueOptions.AutoDelete, // delete when unused
-			config.QueueOptions.Exclusive,  // exclusive
-			config.QueueOptions.NoWait,     // no-wait
-			nil,                            // arguments
-		)
-		if err != nil {
-			return nil, fmt.Errorf("queue declare %s %v", queueName, slog.String("error", err.Error()))
-		}
+	b.channel = channel
+
+	b.notifyClose = make(chan *amqp.Error)
+	b.notifyReturn = make(chan amqp.Return)
+	b.notifyConfirm = make(chan amqp.Confirmation)
+
+	b.channel.NotifyClose(b.notifyClose)
+	b.channel.NotifyReturn(b.notifyReturn)
+
+	if err := b.channel.Confirm(false); err != nil {
+		b.Close()
+		return fmt.Errorf("failed to enable publish confirmations: %w", err)
 	}
-	adapter := &Adapter{
-		conn:    conn,
-		channel: channel,
-		cfg:     config,
-		runMod:  runMod,
-	}
+	b.channel.NotifyPublish(b.notifyConfirm)
 
-	return adapter, nil
-}
-
-func (a *Adapter) Publish(message broker.Message) error {
-
-	// base64EncodedMessage := base64.StdEncoding.EncodeToString(message.Body)
-	// TODO: add publishOptions
-
-	err := a.channel.Publish(
-		"",                // exchange
-		message.QueueName, // routing key (same as queue name)
-		false,             // mandatory
-		false,             // immediate
-		amqp.Publishing{
-			MessageId:    message.ID,
-			DeliveryMode: amqp.Persistent,
-			ContentType:  "application/protobuf",
-			Type:         message.MessageType,
-			Body:         message.Body,
-		})
-	// If there is an error publishing the message, a log will be displayed in the terminal.
-	if err != nil {
-		log.Println("publish rabbit - publish", slog.String("error", err.Error()))
-		return err
-	}
-
-	log.Println("Sending message to Rabbitmq ...")
 	return nil
 }
 
-func (a *Adapter) Consume(queueName string) (<-chan broker.Message, error) {
-	messages, err := a.channel.Consume(
-		queueName,                       // queue
-		"",                              // consumer
-		a.cfg.ConsumerOptions.AutoAck,   // auto-ack
-		a.cfg.ConsumerOptions.Exclusive, // exclusive
-		a.cfg.ConsumerOptions.NoLocal,   // no-local
-		a.cfg.ConsumerOptions.NoWait,    // no-wait
-		nil,                             // arguments
-	)
-	if err != nil {
-		zlog.L.Error("can't consume", zlog.String("queueName", queueName), zlog.Any("error", err))
-		return nil, err
+func (b *Broker) reconnect() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.isClosed {
+		return fmt.Errorf("broker is closed")
 	}
 
+	if b.channel != nil {
+		b.channel.Close()
+	}
+	if b.connection != nil {
+		b.connection.Close()
+	}
+
+	return b.connect()
+}
+
+func (b *Broker) declareQueue(name string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.isClosed {
+		return fmt.Errorf("broker is closed")
+	}
+
+	// Declare the queue
+	queue, err := b.channel.QueueDeclare(
+		name,                             // name
+		b.config.QueueOptions.Durable,    // durable
+		b.config.QueueOptions.AutoDelete, // auto-delete
+		b.config.QueueOptions.Exclusive,  // exclusive
+		b.config.QueueOptions.NoWait,     // no-wait
+		nil,                              // arguments
+	)
+	if err != nil {
+		return fmt.Errorf("failed to declare queue %s: %w", name, err)
+	}
+
+	b.queues[name] = queue
+	return nil
+}
+
+func (b *Broker) Publish(message broker.Message) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.isClosed {
+		return fmt.Errorf("broker is closed")
+	}
+
+	if _, ok := b.queues[message.QueueName]; !ok {
+		if err := b.declareQueue(message.QueueName); err != nil {
+			return err
+		}
+	}
+
+	pub := amqp.Publishing{
+		MessageId:     message.ID,
+		ContentType:   "application/json",
+		Body:          message.Body,
+		DeliveryMode:  amqp.Persistent,
+		Timestamp:     time.Now(),
+		Type:          message.MessageType,
+		CorrelationId: message.ID,
+	}
+
+	err := b.channel.PublishWithContext(
+		context.Background(),
+		"",                // exchange
+		message.QueueName, // routing key (queue name)
+		true,              // mandatory
+		false,             // immediate
+		pub,               // message
+	)
+	if err != nil {
+		if err = b.reconnect(); err != nil {
+			return fmt.Errorf("failed to reconnect to RabbitMQ: %w", err)
+		}
+
+		err = b.channel.PublishWithContext(
+			context.Background(),
+			"",                // exchange
+			message.QueueName, // routing key (queue name)
+			true,              // mandatory
+			false,             // immediate
+			pub,               // message
+		)
+		if err != nil {
+			return fmt.Errorf("failed to publish message after reconnect: %w", err)
+		}
+	}
+
+	// Wait for confirmation
+	select {
+	case confirm := <-b.notifyConfirm:
+		if !confirm.Ack {
+			return fmt.Errorf("failed to publish message: negative acknowledgment")
+		}
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("failed to publish message: confirmation timeout")
+	}
+
+	return nil
+}
+
+func (b *Broker) Consume(queueName string) (<-chan broker.Message, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.isClosed {
+		return nil, fmt.Errorf("broker is closed")
+	}
+
+	if _, ok := b.queues[queueName]; !ok {
+		if err := b.declareQueue(queueName); err != nil {
+			return nil, err
+		}
+	}
+
+	consumerTag := fmt.Sprintf("%s-%s", b.clientName, queueName)
+	deliveries, err := b.channel.Consume(
+		queueName,                          // queue
+		consumerTag,                        // consumer
+		b.config.ConsumerOptions.AutoAck,   // auto-ack
+		b.config.ConsumerOptions.Exclusive, // exclusive
+		b.config.ConsumerOptions.NoLocal,   // no-local
+		b.config.ConsumerOptions.NoWait,    // no-wait
+		nil,                                // args
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to consume from queue %s: %w", queueName, err)
+	}
+
+	b.consumers[queueName] = deliveries
+
 	messageChan := make(chan broker.Message)
-	//TODO: Add communication with  supervisor
+
 	go func() {
-		defer func() {
-			if rErr := recover(); rErr != nil {
-				zlog.L.Debug("rabbit consumer panic", zlog.String("queueName", queueName), zlog.Any("panic", rErr))
-			}
-		}()
-		for delivery := range messages {
-			zlog.L.Debug("Consume message", zlog.String("queueName", queueName))
-			message := broker.Message{
-				ID:          delivery.MessageId,
-				Body:        delivery.Body,
-				MessageType: delivery.Type,
-				QueueName:   delivery.RoutingKey,
-				DeliveryTag: delivery.DeliveryTag,
-			}
+		defer close(messageChan)
 
-			messageChan <- message
-
-			zlog.L.Debug("Consumer Options", zlog.String("queueName", queueName), zlog.Any("ConsumerOptions", a.cfg.ConsumerOptions))
-			if !a.cfg.ConsumerOptions.AutoAck {
-				// Acknowledge the message to remove it from the queue
-				err = a.Ack(delivery.DeliveryTag)
-				if err != nil {
-					zlog.L.Error("Error acknowledging message", zlog.String("queueName", queueName), zlog.Any("error", err))
+		for {
+			select {
+			case delivery, ok := <-deliveries:
+				if !ok {
+					zlog.L.Info("Delivery channel closed")
+					return
 				}
-				fmt.Println("Consume message RabbitMQ 2", time.Now())
-				zlog.L.Debug("acknowledged message  successfully", zlog.String("queueName", queueName))
+
+				messageChan <- broker.Message{
+					ID:          delivery.MessageId,
+					Body:        delivery.Body,
+					MessageType: delivery.Type,
+					QueueName:   queueName,
+					DeliveryTag: delivery.DeliveryTag,
+				}
+
+			case <-b.notifyClose:
+				zlog.L.Warn("AMQP connection closed during consume")
+				return
 			}
 		}
-		zlog.L.Info("rabbit consumer  channel closed", zlog.String("queueName", queueName))
-		close(messageChan)
 	}()
 
 	return messageChan, nil
 }
 
-func (a *Adapter) Ack(deliveryTag uint64) error {
-	return a.channel.Ack(deliveryTag, false)
-}
+func (b *Broker) Ack(deliveryTag uint64) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 
-func (a *Adapter) Nack(tag uint64, requeue bool) error {
-	return a.channel.Nack(tag, false, requeue)
-}
-
-func (a *Adapter) ConsumeDelivery(queueName string) (<-chan amqp.Delivery, error) {
-	messages, err := a.channel.Consume(
-		queueName, // queue
-		"",        // consumer
-		true,      // auto-ack
-		false,     // exclusive
-		false,     // no-local
-		false,     // no-wait
-		nil,       // arguments
-	)
-	if err != nil {
-		zlog.L.Error("can't consume", zlog.String("queueName", queueName), zlog.Any("error", err))
-		return nil, err
+	if b.isClosed {
+		return fmt.Errorf("broker is closed")
 	}
 
-	return messages, nil
+	return b.channel.Ack(deliveryTag, false)
 }
 
-// ConsumeWithManualAckAndSinglePrefetch consumes messages with manual acknowledgment and prefetch count of 1
-func (a *Adapter) ConsumeWithManualAckAndSinglePrefetch(queueName string) (<-chan broker.Message, error) {
-	// Set prefetch count to 1
-	err := a.channel.Qos(
-		1,     // prefetch count
-		0,     // prefetch size
-		false, // global
-	)
-	if err != nil {
-		zlog.L.Error("failed to set QoS", zlog.String("queueName", queueName), zlog.Any("error", err))
-		return nil, err
+func (b *Broker) Nack(deliveryTag uint64, requeue bool) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.isClosed {
+		return fmt.Errorf("broker is closed")
 	}
 
-	// Use manual acknowledgment
-	messages, err := a.channel.Consume(
-		queueName, // queue
-		"",        // consumer
-		false,     // auto-ack (false for manual ack)
-		false,     // exclusive
-		false,     // no-local
-		false,     // no-wait
-		nil,       // arguments
-	)
-	if err != nil {
-		zlog.L.Error("can't consume with single prefetch", zlog.String("queueName", queueName), zlog.Any("error", err))
-		return nil, err
+	return b.channel.Nack(deliveryTag, false, requeue)
+}
+
+func (b *Broker) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.isClosed {
+		return nil
 	}
 
-	messageChan := make(chan broker.Message)
-	go func() {
-		defer func() {
-			if rErr := recover(); rErr != nil {
-				zlog.L.Debug("rabbit consumer panic", zlog.String("queueName", queueName), zlog.Any("panic", rErr))
-			}
-		}()
-		for delivery := range messages {
-			zlog.L.Debug("Consume message with single prefetch", zlog.String("queueName", queueName))
-			message := broker.Message{
-				ID:          delivery.MessageId,
-				Body:        delivery.Body,
-				MessageType: delivery.Type,
-				QueueName:   delivery.RoutingKey,
-				DeliveryTag: delivery.DeliveryTag,
-			}
+	b.isClosed = true
 
-			messageChan <- message
+	var errs []error
+
+	if b.channel != nil {
+		if err := b.channel.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("error closing channel: %w", err))
 		}
-		zlog.L.Info("rabbit consumer channel closed", zlog.String("queueName", queueName))
-		close(messageChan)
-	}()
+	}
 
-	return messageChan, nil
+	if b.connection != nil {
+		if err := b.connection.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("error closing connection: %w", err))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("errors closing RabbitMQ connection: %v", errs)
+	}
+
+	return nil
 }
