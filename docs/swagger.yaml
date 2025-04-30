@@ -1,0 +1,334 @@
+basePath: /api/v1
+definitions:
+  internal_delivery_http_pollhandler.CreatePollRequest:
+    description: CreatePollRequest represents the request for creating a poll
+    properties:
+      options:
+        example:
+        - '[''Go'''
+        - ' ''Python'''
+        - ' ''JavaScript'']'
+        items:
+          type: string
+        maxItems: 10
+        minItems: 2
+        type: array
+      tags:
+        example:
+        - '[''technology'''
+        - ' ''programming'']'
+        items:
+          type: string
+        maxItems: 5
+        minItems: 1
+        type: array
+      title:
+        example: What's your favorite programming language?
+        maxLength: 200
+        minLength: 3
+        type: string
+    required:
+    - options
+    - tags
+    - title
+    type: object
+  internal_delivery_http_pollhandler.GetPollStatsResponse:
+    description: GetPollStatsResponse represents the response for getting poll statistics
+    properties:
+      pollId:
+        example: 1
+        type: integer
+      totalVotes:
+        example: 100
+        type: integer
+      votes:
+        items:
+          $ref: '#/definitions/internal_delivery_http_pollhandler.Vote'
+        type: array
+    type: object
+  internal_delivery_http_pollhandler.GetPollsResponse:
+    description: GetPollsResponse represents the response for getting polls
+    properties:
+      createdAt:
+        example: "2024-03-20T10:00:00Z"
+        type: string
+      id:
+        example: 1
+        type: integer
+      options:
+        example:
+        - '[''Go'''
+        - ' ''Python'''
+        - ' ''JavaScript'']'
+        items:
+          type: string
+        type: array
+      tags:
+        example:
+        - '[''technology'''
+        - ' ''programming'']'
+        items:
+          type: string
+        type: array
+      title:
+        example: What's your favorite programming language?
+        type: string
+    type: object
+  internal_delivery_http_pollhandler.SkipRequest:
+    description: SkipRequest represents the request for skipping a poll
+    properties:
+      userId:
+        example: 1
+        type: integer
+    required:
+    - userId
+    type: object
+  internal_delivery_http_pollhandler.Vote:
+    description: Vote represents vote statistics for a single option
+    properties:
+      count:
+        example: 50
+        type: integer
+      option:
+        example: Go
+        type: string
+    type: object
+  internal_delivery_http_pollhandler.VoteRequest:
+    description: VoteRequest represents the request for voting on a poll
+    properties:
+      optionIndex:
+        example: 0
+        minimum: 0
+        type: integer
+      userId:
+        example: 1
+        type: integer
+    required:
+    - optionIndex
+    - userId
+    type: object
+  pollapp_pkg_errors.ErrorResponse:
+    properties:
+      code:
+        type: integer
+      details:
+        type: string
+      message:
+        type: string
+    type: object
+host: localhost:8080
+info:
+  contact: {}
+  description: API for managing polls and votes
+  title: Poll API
+  version: "1.0"
+paths:
+  /polls:
+    get:
+      consumes:
+      - application/json
+      description: Get a list of polls with optional filtering and pagination
+      parameters:
+      - default: 20
+        example: 20
+        in: query
+        maximum: 100
+        minimum: 1
+        name: limit
+        type: integer
+      - default: 1
+        example: 1
+        in: query
+        minimum: 1
+        name: page
+        type: integer
+      - example: technology
+        in: query
+        name: tag
+        type: string
+      - example: 1
+        in: query
+        name: userID
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: List of polls
+          schema:
+            items:
+              $ref: '#/definitions/internal_delivery_http_pollhandler.GetPollsResponse'
+            type: array
+        "400":
+          description: Invalid request
+          schema:
+            $ref: '#/definitions/pollapp_pkg_errors.ErrorResponse'
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/pollapp_pkg_errors.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get polls
+      tags:
+      - Polls
+    post:
+      consumes:
+      - application/json
+      description: Create a new poll with title, options, and tags
+      parameters:
+      - description: Poll creation request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_delivery_http_pollhandler.CreatePollRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Poll created successfully
+        "400":
+          description: Invalid request
+          schema:
+            $ref: '#/definitions/pollapp_pkg_errors.ErrorResponse'
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/pollapp_pkg_errors.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Create a new poll
+      tags:
+      - Polls
+  /polls/{id}/skip:
+    post:
+      consumes:
+      - application/json
+      description: Mark a poll as skipped for a user
+      parameters:
+      - description: Poll ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Skip request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_delivery_http_pollhandler.SkipRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Poll skipped successfully
+        "400":
+          description: Invalid request
+          schema:
+            $ref: '#/definitions/pollapp_pkg_errors.ErrorResponse'
+        "404":
+          description: Poll not found
+          schema:
+            $ref: '#/definitions/pollapp_pkg_errors.ErrorResponse'
+        "409":
+          description: Already skipped
+          schema:
+            $ref: '#/definitions/pollapp_pkg_errors.ErrorResponse'
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/pollapp_pkg_errors.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Skip a poll
+      tags:
+      - Polls
+  /polls/{id}/stats:
+    get:
+      consumes:
+      - application/json
+      description: Get voting statistics for a specific poll
+      parameters:
+      - description: Poll ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Poll statistics
+          schema:
+            $ref: '#/definitions/internal_delivery_http_pollhandler.GetPollStatsResponse'
+        "400":
+          description: Invalid request
+          schema:
+            $ref: '#/definitions/pollapp_pkg_errors.ErrorResponse'
+        "404":
+          description: Poll not found
+          schema:
+            $ref: '#/definitions/pollapp_pkg_errors.ErrorResponse'
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/pollapp_pkg_errors.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get poll statistics
+      tags:
+      - Polls
+  /polls/{id}/vote:
+    post:
+      consumes:
+      - application/json
+      description: Submit a vote for a specific option in a poll
+      parameters:
+      - description: Poll ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Vote request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_delivery_http_pollhandler.VoteRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Vote recorded successfully
+        "400":
+          description: Invalid request
+          schema:
+            $ref: '#/definitions/pollapp_pkg_errors.ErrorResponse'
+        "404":
+          description: Poll not found
+          schema:
+            $ref: '#/definitions/pollapp_pkg_errors.ErrorResponse'
+        "409":
+          description: Already voted
+          schema:
+            $ref: '#/definitions/pollapp_pkg_errors.ErrorResponse'
+        "500":
+          description: Internal server error
+          schema:
+            $ref: '#/definitions/pollapp_pkg_errors.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Vote on a poll
+      tags:
+      - Polls
+schemes:
+- http
+- https
+securityDefinitions:
+  BearerAuth:
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"
